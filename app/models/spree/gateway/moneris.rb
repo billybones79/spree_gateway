@@ -8,20 +8,7 @@ module Spree
     end
 
     def cancel(response_code)
-      p = Spree::Payment.find_by(response_code: response_code)
-
-      puts "###############################################
-
-
-
-
-
-
-
-
-      p.inspect"
-
-
+      provider.void(response_code, {})
     end
   end
 end
