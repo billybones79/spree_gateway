@@ -31,6 +31,20 @@ module Spree
       true
     end
 
+    def disable_customer_profile(source)
+      if source.gateway_customer_profile_id
+        response = provider.unstore(source.gateway_customer_profile_id)
+        if response.success?
+          source.update_attributes(gateway_customer_profile_id: nil, gateway_payment_profile_id: nil)
+          source.destroy!
+        else
+          source.send(:gateway_error, response)
+        end
+      else
+        raise 'You must implement disable_customer_profile method for this gateway.'
+      end
+    end
+
     #Customer profile
 
     def create_profile(payment)
