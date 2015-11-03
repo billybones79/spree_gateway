@@ -41,7 +41,7 @@ module Spree
           source.send(:gateway_error, response)
         end
       else
-        raise 'You must implement disable_customer_profile method for this gateway.'
+        source.destroy!
       end
     end
 
