@@ -1,160 +1,173 @@
 require 'spec_helper'
 
 describe Spree::Gateway::Moneris do
-  let(:gateway) { described_class.create!(name: 'Moneris') }
-
-  let(:login_value) { 'store3' }
-  let(:password_value) { 'yesguy' }
-  let(:email) { 'customer@example.com' }
-  let(:source) { Spree::CreditCard.new }
-
-  let(:payment) {
-    double('Spree::Payment',
-           source: source,
-           order: double('Spree::Order',
-                         email: email,
-                         bill_address: bill_address
-           )
-    )
-  }
-
-  let(:provider) do
-    double('provider').tap do |p|
-      p.stub(:purchase)
-      p.stub(:authorize)
-      p.stub(:capture)
-    end
-  end
-
   before do
-    subject.preferences = { login:login_value, password: password_value }
-    subject.stub(:provider).and_return provider
+    Spree::Gateway.update_all(active: false)
+    @gateway = Spree::Gateway::Moneris.create!(name: 'Moneris Gateway', active: true)
+    @gateway.preferences = {
+        login: 'store3',
+        password: 'yesguy',
+        server: 'test',
+    }
+    @gateway.save!
+
+    with_payment_profiles_off do
+      country = create(:country, name: 'United States', iso_name: 'UNITED STATES', iso3: 'USA', iso: 'US', numcode: 840)
+      state   = create(:state, name: 'Maryland', abbr: 'MD', country: country)
+      address = create(:address,
+                       firstname: 'John',
+                       lastname:  'Doe',
+                       address1:  '1234 My Street',
+                       address2:  'Apt 1',
+                       city:      'Washington DC',
+                       zipcode:   '20123',
+                       phone:     '(555)555-5555',
+                       state:     state,
+                       country:   country
+      )
+
+      order = create(:order_with_totals, bill_address: address, ship_address: address)
+      order.update!
+
+      @credit_card = create(:credit_card,
+                            verification_value: '123',
+                            number:             '4242424242424242',
+                            month:              9,
+                            year:               Time.now.year + 1,
+                            name:               'John Doe',
+                            cc_type:            'mastercard')
+
+      @payment = create(:payment, source: @credit_card, order: order, payment_method: @gateway, amount: 10.00)
+    end
   end
 
   context '.provider_class' do
     it 'is a Moneris gateway' do
-      expect(gateway.provider_class).to eq ::ActiveMerchant::Billing::MonerisGateway
+      expect(@gateway.provider_class).to eq ::ActiveMerchant::Billing::MonerisGateway
     end
   end
 
-  describe '#create_profile' do
-    before do
-      payment.source.stub(:update_attributes!)
+  context '.payment_profiles_supported?' do
+    it 'return true' do
+      expect(@gateway.payment_profiles_supported?).to be true
     end
+  end
 
-    context 'with an order that has a bill address' do
-      let(:bill_address) {
-        double('Spree::Address',
-               address1: '123 Happy Road',
-               address2: 'Apt 303',
-               city: 'Suzarac',
-               zipcode: '95671',
-               state: double('Spree::State', name: 'Oregon'),
-               country: double('Spree::Country', name: 'United States')
-        )
-      }
+  describe 'authorize' do
+    context "the credit card has a token" do
+      before(:each) do
+        @credit_card.update_attributes(gateway_payment_profile_id: 'test')
+      end
 
-      it 'stores the bill address with the provider' do
-        subject.provider.should_receive(:store).with(payment.source).and_return double.as_null_object
-        subject.create_profile payment
+      it 'calls provider#authorize using the gateway_payment_profile_id' do
+        expect(@gateway.provider).to receive(:authorize).with(500, 'test', {} )
+        @gateway.authorize(500, @credit_card)
       end
     end
 
-    context 'with an order that does not have a bill address' do
-      let(:bill_address) { nil }
+    context "the given credit card does not have a token" do
+      context "the credit card has a payment profile id" do
+        before(:each) do
+          @credit_card.update_attributes(gateway_payment_profile_id: '12345')
+        end
 
-      it 'does not store a bill address with the provider' do
-        subject.provider.should_receive(:store).with(payment.source).and_return double.as_null_object
+        it 'calls provider#authorize using the gateway_payment_profile_id' do
+          expect(@gateway.provider).to receive(:authorize).with(500, '12345', {})
+          @gateway.authorize(500, @credit_card)
+        end
+      end
 
-        subject.create_profile payment
+      context "no payment profile id" do
+        it 'calls provider#authorize with the credit card object' do
+          expect(@gateway.provider).to receive(:authorize).with(500, @credit_card, {})
+          @gateway.authorize(500, @credit_card)
+        end
       end
     end
 
-    context 'with a card represents payment_profile' do
-      let(:source) { Spree::CreditCard.new(gateway_payment_profile_id: 'tok_profileid') }
-      let(:bill_address) { nil }
+    it 'return a success response with an authorization code' do
+      #Avoid duplicate order_id error
+      result = @gateway.authorize(500, @credit_card, {order_id: "ord_#{Time.now.to_i}"})
+      expect(result.success?).to be true
+      expect(result.authorization).to match /^\d{5,}-\d{1}_\d{2};ord_\d+/
+    end
 
-      it 'stores the profile_id as a card' do
-        subject.provider.should_receive(:store).with(source.gateway_payment_profile_id).and_return double.as_null_object
-        subject.create_profile payment
+    shared_examples 'a valid credit card' do
+      it 'work through the spree payment interface' do
+        Spree::Config.set auto_capture: false
+        expect(@payment.log_entries.size).to eq(0)
+
+        @payment.process!
+        expect(@payment.log_entries.size).to eq(1)
+        expect(@payment.response_code).to match /^\d{5,}-\d{1}_\d{2};#{@payment.order.number}-#{@payment.number}/
+        expect(@payment.state).to eq 'pending'
       end
     end
-  end
 
-  context 'purchasing' do
-    after do
-      subject.purchase(19.99, 'credit card', {})
+    context 'when the card is a mastercard' do
+      before do
+        @credit_card.number = '5555555555554444'
+        @credit_card.cc_type = 'mastercard'
+        @credit_card.save
+      end
+
+      it_behaves_like 'a valid credit card'
     end
 
-    it 'send the payment to the provider' do
-      provider.should_receive(:purchase).with(19.99, 'credit card', {})
-    end
-  end
+    context 'when the card is a visa' do
+      before do
+        @credit_card.number = '4111111111111111'
+        @credit_card.cc_type = 'visa'
+        @credit_card.save
+      end
 
-  context 'authorizing' do
-    after do
-      subject.authorize(19.99, 'credit card', {})
-    end
-
-    it 'send the authorization to the provider' do
-      provider.should_receive(:authorize).with(19.99, 'credit card', {})
-    end
-  end
-
-  context 'capturing' do
-    after do
-      subject.capture(1234, 'response_code', {})
+      it_behaves_like 'a valid credit card'
     end
 
-    it 'convert the amount to cents' do
-      provider.should_receive(:capture).with(1234,anything,anything)
-    end
+    context 'when the card is an amex' do
+      before do
+        @credit_card.number = '378282246310005'
+        @credit_card.verification_value = '1234'
+        @credit_card.cc_type = 'amex'
+        @credit_card.save
+      end
 
-    it 'use the response code as the authorization' do
-      provider.should_receive(:capture).with(anything,'response_code',anything)
+      it_behaves_like 'a valid credit card'
     end
   end
 
-  context 'capture with payment class' do
-    let(:gateway) do
-      gateway = described_class.new(active: true)
-      gateway.set_preference :login, login_value
-      gateway.set_preference :password, password_value
-      gateway.stub(:provider).and_return provider
-      gateway.stub :source_required => true
-      gateway
+  describe 'capture' do
+    it 'do capture a previous authorization' do
+      @payment.process!
+      expect(@payment.log_entries.size).to eq(1)
+      expect(@payment.response_code).to match /^\d{5,}-\d{1}_\d{2};#{@payment.order.number}-#{@payment.number}/
+
+      capture_result = @gateway.capture(@payment.amount, @payment.response_code, {})
+      expect(capture_result.success?).to be true
     end
 
-    let(:order) { Spree::Order.create }
-
-    let(:card) do
-      create :credit_card, gateway_customer_profile_id: 'cus_abcde', imported: false
+    it 'raise an error if capture fails using spree interface' do
+      Spree::Config.set(auto_capture: false)
+      expect(@payment.log_entries.size).to eq(0)
+      @payment.process!
+      expect(@payment.log_entries.size).to eq(1)
+      @payment.capture! # as done in PaymentsController#fire
+      expect(@payment.completed?).to be true
     end
+  end
 
-    let(:payment) do
-      payment = Spree::Payment.new
-      payment.source = card
-      payment.order = order
-      payment.payment_method = gateway
-      payment.amount = 98.55
-      payment.state = 'pending'
-      payment.response_code = '12345'
-      payment
+  def with_payment_profiles_off(&block)
+    Spree::Gateway::Moneris.class_eval do
+      def payment_profiles_supported?
+        false
+      end
     end
-
-    let!(:success_response) do
-      double('success_response', :success? => true,
-             :authorization => '123',
-             :avs_result => { 'code' => 'avs-code' },
-             :cvv_result => { 'code' => 'cvv-code', 'message' => "CVV Result"})
-    end
-
-    after do
-      payment.capture!
-    end
-
-    it 'gets correct amount' do
-      provider.should_receive(:capture).with(9855,'12345',anything).and_return(success_response)
+    yield
+  ensure
+    Spree::Gateway::Moneris.class_eval do
+      def payment_profiles_supported?
+        true
+      end
     end
   end
 end
