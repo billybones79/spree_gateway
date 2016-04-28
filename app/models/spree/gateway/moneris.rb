@@ -35,7 +35,7 @@ module Spree
     end
 
     def credit(credit_cents, source, transaction_id, options = {})
-      provider.refund( credit_cents, transaction_id, options )
+      provider.refund(credit_cents, transaction_id, options )
     end
 
     def payment_profiles_supported?

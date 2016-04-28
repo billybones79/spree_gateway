@@ -156,6 +156,51 @@ describe Spree::Gateway::Moneris do
     end
   end
 
+  context 'purchase' do
+    it 'return a success response with an authorization code' do
+      result =  @gateway.purchase(500, @credit_card, {order_id: "ord_#{Time.now.to_i}"})
+      expect(result.success?).to be true
+      expect(result.authorization).to match /^\d{5,}-\d{1}_\d{2};ord_\d+/
+    end
+
+    it 'work through the spree payment interface with payment profiles' do
+      purchase_using_spree_interface
+    end
+
+    it 'work through the spree payment interface without payment profiles' do
+      with_payment_profiles_off do
+        purchase_using_spree_interface(false)
+      end
+    end
+  end
+
+  context 'void' do
+    # Moneris can only void pending payments.
+    # If payment was captured, it needs to be credited/refunded
+    before do
+      Spree::Config.set(auto_capture: false)
+    end
+
+    it 'work through the spree credit_card / payment interface' do
+      expect(@payment.log_entries.size).to eq(0)
+      @payment.process!
+      expect(@payment.log_entries.size).to eq(1)
+      expect(@payment.response_code).to match /^\d{5,}-\d{1}_\d{2};#{@payment.order.number}-#{@payment.number}/
+      @payment.void_transaction!
+      expect(@payment.state).to eq 'void'
+    end
+  end
+
+  def purchase_using_spree_interface(profile=true)
+    Spree::Config.set(auto_capture: true)
+    @payment.send(:create_payment_profile) if profile
+    @payment.log_entries.size == 0
+    @payment.process! # as done in PaymentsController#create
+    @payment.log_entries.size == 1
+    expect(@payment.response_code).to match /^\d{5,}-\d{1}_\d{2};#{@payment.order.number}-#{@payment.number}/
+    expect(@payment.state).to eq 'completed'
+  end
+
   def with_payment_profiles_off(&block)
     Spree::Gateway::Moneris.class_eval do
       def payment_profiles_supported?
