@@ -17,8 +17,8 @@ module Spree
 
     def authorize(money, source, options = {})
 
-      if source.gateway_payment_profile_id
-        payment_method = source.gateway_payment_profile_id
+      if source.gateway_customer_profile_id
+        payment_method = source.gateway_customer_profile_id
       else
         payment_method = source
       end
@@ -27,7 +27,14 @@ module Spree
     end
 
     def purchase(money, source, options = {})
-      provider.purchase(money, source, options)
+
+      if source.gateway_customer_profile_id
+        payment_method = source.gateway_customer_profile_id
+      else
+        payment_method = source
+      end
+
+      provider.purchase(money, payment_method, options)
     end
 
     def capture(money, response_code, gateway_options)
@@ -43,10 +50,10 @@ module Spree
     end
 
     def disable_customer_profile(source)
-      if source.gateway_payment_profile_id
-        response = provider.unstore(source.gateway_payment_profile_id)
+      if source.gateway_customer_profile_id
+        response = provider.unstore(source.gateway_customer_profile_id)
         if response.success?
-          source.update_attributes(gateway_payment_profile_id: nil)
+          source.update_attributes(gateway_customer_profile_id: nil, gateway_payment_profile_id: nil)
           source.destroy!
         else
           source.send(:gateway_error, response)
@@ -57,10 +64,10 @@ module Spree
     end
 
     def create_profile(payment)
-      if payment.source.gateway_payment_profile_id.nil?
+      if payment.source.gateway_customer_profile_id.nil?
         response = provider.store(payment.source)
         if response.success?
-          payment.source.update_attributes(gateway_payment_profile_id: response.params['data_key'])
+          payment.source.update_attributes(gateway_payment_profile_id: response.params['data_key'], gateway_customer_profile_id: response.params['data_key'])
         else
           payment.send(:gateway_error, response)
         end
